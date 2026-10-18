@@ -148,8 +148,13 @@ std::string LPS::CleanFolderName(const char* raw, size_t maxLen)
     return name;
 }
 
-void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cleanUp)
+void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cleanUp,
+                 const std::string& outputRoot)
 {
+    uint32_t okCount = 0;
+    uint32_t skipCount = 0;
+    uint32_t failCount = 0;
+
     // fileIndex -> folder name
     std::map<uint32_t, std::string> fileToFolder;
 
@@ -178,6 +183,7 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
 
         if (file.size == 0) {
             std::cout << "  [" << i << "] SKIP zero-size\n";
+            ++skipCount;
             continue;
         }
 
@@ -193,7 +199,7 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
         if (dot != std::string::npos) stem = stem.substr(0, dot);
         if (stem.empty()) stem = "unnamed_" + std::to_string(i);
 
-        std::string outDir = JoinPath("out", folderName);
+        std::string outDir = JoinPath(outputRoot, folderName);
         CreateDirRecursive(outDir);
 
         std::string ss2Path = JoinPath(outDir, stem + ".ss2");
@@ -212,6 +218,7 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
         m_Stream.read(audio.data(), file.size);
         if (static_cast<uint32_t>(m_Stream.gcount()) != file.size) {
             std::cerr << "  [" << i << "] short read for " << origName << "\n";
+            ++failCount;
             continue;
         }
 
@@ -231,6 +238,7 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
             std::ofstream out(ss2Path.c_str(), std::ios::binary);
             if (!out) {
                 std::cerr << "  [" << i << "] cannot create " << ss2Path << "\n";
+                ++failCount;
                 continue;
             }
             out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
@@ -243,6 +251,7 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
 
         std::cout << "  [" << i << "] " << folderName << "/" << displayName
                   << "  (" << file.size << " bytes, " << file.frequency << " Hz)\n";
+        ++okCount;
 
         if (extractOnly) continue;
 
@@ -277,5 +286,14 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
         }
     }
 
-    std::cout << "Done.\n";
+    std::cout << "\n========== Summary ==========\n";
+    std::cout << "  Total entries : " << m_Header.files << "\n";
+    std::cout << "  Extracted OK  : " << okCount << "\n";
+    std::cout << "  Skipped       : " << skipCount << "\n";
+    std::cout << "  Failed        : " << failCount << "\n";
+    if (m_Header.files > 0) {
+        std::cout << "  Success rate  : " << (okCount * 100 / m_Header.files) << "%\n";
+    }
+    std::cout << "=============================\n";
 }
+

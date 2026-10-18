@@ -1,36 +1,45 @@
 //------------------------------------------------
 //--- 010 Editor Binary Template
-//    LithTech PSX Sound Data 1.20 (LPS)
-//    Fixed header size + folder comments
+//
+//      File: LithTech PSX Sound Data (LPS)
+//   Authors: haekb / fixed 2026
+//   Version: 1.1
+//   Purpose: Parse NOLF PS2 / LithTech LPS sound archives
+//  Category: Audio
+// File Mask: *.lps, *.lit
+//  ID Bytes: 4C 69 74 68 54 65 63 68 20 50 53 58
+//   History: 
+//     1.0 - original (broken header size)
+//     1.1 - fixed id[32], correct header layout, folder comments
 //------------------------------------------------
 
 struct Header {
-    char     id[32];        // "LithTech PSX Sound Data 1.20\r\n\x1a\0"
-    uint32   dummy;
-    uint32   folders;
-    uint32   files;
-    uint32   dummy2;
-    uint32   dummy3;
+    char   id[32];      // "LithTech PSX Sound Data 1.20\r\n\x1a\0"
+    uint32 dummy;
+    uint32 folders;
+    uint32 files;
+    uint32 dummy2;
+    uint32 dummy3;
 };
 
 struct File {
-    char     filename[0x20];
-    uint32   zero;
-    uint32   offset;        // relative to base_offset
-    uint32   size;
-    uint32   frequency;
-    uint32   zero2;
-    uint32   size2;         // usually size - 32
-    uint32   dummy[4];
+    char   filename[0x20];
+    uint32 zero;
+    uint32 offset;      // relative to base_offset
+    uint32 size;
+    uint32 frequency;
+    uint32 zero2;
+    uint32 size2;       // usually size - 32
+    uint32 dummy[4];
 };
 
 struct Folder {
-    char     foldername[32]; // printable name, often padded with zeros/garbage
-    uint32   subfolders;     // number of child folders
-    uint32   files;          // number of files in this folder
-    uint32   priority;       // higher = closer to root
-    uint32   fileStartIndex; // first file index (inclusive)
-    // files belong to [fileStartIndex .. fileStartIndex + files)
+    char   foldername[32];  // e.g. ENGLISH, AMERICAN, PLAYER, VOICE, DOORS...
+    uint32 subfolders;      // number of child folders
+    uint32 files;           // number of files in this folder
+    uint32 priority;        // higher = closer to root
+    uint32 fileStartIndex;  // first file index (inclusive)
+    // Files belonging to this folder: [fileStartIndex .. fileStartIndex + files)
 };
 
 Header hdr;
@@ -41,6 +50,5 @@ local uint64 base_offset = base_pos + (hdr.files * 0x48) + (hdr.folders * 0x30);
 File   files[hdr.files]     <optimize=false>;
 Folder folders[hdr.folders] <optimize=false>;
 
-// Optional: jump to a specific sound
-// local uint64 sample = files[0].offset + base_offset;
-// FSeek(sample);
+// Optional: seek to first sample
+// FSeek(files[0].offset + base_offset);

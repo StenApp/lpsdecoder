@@ -62,3 +62,24 @@ lpsdecoder.exe -f t06s01.lps -e
 - Original tool by haekb
 - Format research / BMS script by aluigi (zenhax)
 - Folder-handling rewrite 2026
+
+## Batch mode
+
+Process every `.lps` / `.lit` in a folder:
+
+```bash
+lpsdecoder -b C:\path\to\lps_folder
+lpsdecoder -b ./sounds -e
+```
+
+Each archive is extracted into its own subfolder:
+
+```
+out/
+  t06s01/
+    ENGLISH/
+    AMERICAN/
+    ...
+  t06s02/
+    ...
+```

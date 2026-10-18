@@ -57,10 +57,11 @@ public:
 
     // extractOnly = true  -> only write .ss2
     // cleanUp    = true  -> delete .ss2 after successful conversion
-    void Extract(const std::string& pathToVGMStream, bool extractOnly, bool cleanUp);
+    // outputRoot = base output directory (default "out")
+    void Extract(const std::string& pathToVGMStream, bool extractOnly, bool cleanUp,
+                 const std::string& outputRoot = "out");
 
 private:
-    // Returns a clean folder name (printable chars only, no path separators)
     static std::string CleanFolderName(const char* raw, size_t maxLen);
 
     Header m_Header{};
