@@ -5,3 +5,4 @@ Release/*
 */Release/*
 */out/*
 *.lps
+/lpsdecoder/x64/Release

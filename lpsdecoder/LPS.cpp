@@ -1,21 +1,82 @@
 #include "LPS.h"
 #include <iostream>
-#include <filesystem>
 #include <map>
 #include <set>
 #include <algorithm>
 #include <cstring>
+#include <vector>
+#include <string>
 
 #ifdef _WIN32
 #include <Windows.h>
+#include <direct.h>
+#define PATH_SEP "\\"
 #else
-// simple replacements for non-Windows
 #include <cstdlib>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
+#define PATH_SEP "/"
 #endif
 
-namespace fs = std::filesystem;
+// ---- small path helpers (no std::filesystem needed) ----
+static bool DirExists(const std::string& path)
+{
+#ifdef _WIN32
+    DWORD attr = GetFileAttributesA(path.c_str());
+    return (attr != INVALID_FILE_ATTRIBUTES) && (attr & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+static bool FileExists(const std::string& path)
+{
+#ifdef _WIN32
+    DWORD attr = GetFileAttributesA(path.c_str());
+    return (attr != INVALID_FILE_ATTRIBUTES) && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+#endif
+}
+
+static bool CreateDirRecursive(const std::string& path)
+{
+    if (path.empty() || DirExists(path)) return true;
+
+    // create parent first
+    size_t pos = path.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        if (!CreateDirRecursive(path.substr(0, pos))) return false;
+    }
+
+#ifdef _WIN32
+    return _mkdir(path.c_str()) == 0 || DirExists(path);
+#else
+    return mkdir(path.c_str(), 0755) == 0 || DirExists(path);
+#endif
+}
+
+static bool RemoveFile(const std::string& path)
+{
+#ifdef _WIN32
+    return DeleteFileA(path.c_str()) != 0;
+#else
+    return unlink(path.c_str()) == 0;
+#endif
+}
+
+static std::string JoinPath(const std::string& a, const std::string& b)
+{
+    if (a.empty()) return b;
+    char last = a.back();
+    if (last == '/' || last == '\\') return a + b;
+    return a + PATH_SEP + b;
+}
+
+// -------------------------------------------------------
 
 LPS::LPS() = default;
 
@@ -31,14 +92,12 @@ bool LPS::Open(const std::string& filename)
         return false;
     }
 
-    // Read header (52 bytes)
     m_Stream.read(reinterpret_cast<char*>(&m_Header), sizeof(m_Header));
-    if (m_Stream.gcount() != sizeof(m_Header)) {
+    if (m_Stream.gcount() != static_cast<std::streamsize>(sizeof(m_Header))) {
         std::cerr << "Failed to read header\n";
         return false;
     }
 
-    // Sanity check
     if (std::strncmp(m_Header.id, "LithTech PSX Sound Data 1.20", 28) != 0) {
         std::cerr << "Not a valid LithTech PSX Sound Data file\n";
         return false;
@@ -46,19 +105,16 @@ bool LPS::Open(const std::string& filename)
 
     std::cout << "Folders: " << m_Header.folders << "  Files: " << m_Header.files << "\n";
 
-    // Read file entries
     m_Files.resize(m_Header.files);
     for (uint32_t i = 0; i < m_Header.files; ++i) {
         m_Stream.read(reinterpret_cast<char*>(&m_Files[i]), sizeof(FileEntry));
     }
 
-    // Read folder entries
     m_Folders.resize(m_Header.folders);
     for (uint32_t i = 0; i < m_Header.folders; ++i) {
         m_Stream.read(reinterpret_cast<char*>(&m_Folders[i]), sizeof(FolderEntry));
     }
 
-    // Audio data starts right after the directory tables
     m_BaseOffset = static_cast<uint32_t>(m_Stream.tellg());
     std::cout << "Audio base offset: 0x" << std::hex << m_BaseOffset << std::dec << "\n";
 
@@ -79,14 +135,12 @@ std::string LPS::CleanFolderName(const char* raw, size_t maxLen)
     for (size_t i = 0; i < maxLen; ++i) {
         unsigned char c = static_cast<unsigned char>(raw[i]);
         if (c == 0) break;
-        // only keep printable ASCII, skip path separators
         if (c >= 32 && c < 127 && c != '/' && c != '\\' && c != ':' && c != '*') {
             name += static_cast<char>(c);
         } else {
-            break; // stop at first non-printable (common in these files)
+            break;
         }
     }
-    // trim trailing spaces/dots
     while (!name.empty() && (name.back() == ' ' || name.back() == '.')) {
         name.pop_back();
     }
@@ -96,12 +150,11 @@ std::string LPS::CleanFolderName(const char* raw, size_t maxLen)
 
 void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cleanUp)
 {
-    // Build a map: fileIndex -> folder name
-    // Only leaf folders that actually own files are used.
+    // fileIndex -> folder name
     std::map<uint32_t, std::string> fileToFolder;
-    std::set<uint32_t> assigned;
 
-    for (const auto& folder : m_Folders) {
+    for (size_t fi = 0; fi < m_Folders.size(); ++fi) {
+        const FolderEntry& folder = m_Folders[fi];
         if (folder.files == 0) continue;
 
         uint32_t start = folder.fileStartIndex;
@@ -116,14 +169,10 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
         std::string folderName = CleanFolderName(folder.foldername, 32);
 
         for (uint32_t i = start; i < start + count; ++i) {
-            // later folders can override earlier ones if ranges overlap
-            // (shouldn't happen with correct data, but be safe)
             fileToFolder[i] = folderName;
-            assigned.insert(i);
         }
     }
 
-    // Extract every file
     for (uint32_t i = 0; i < m_Header.files; ++i) {
         const FileEntry& file = m_Files[i];
 
@@ -132,37 +181,31 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
             continue;
         }
 
-        // Determine output folder
         std::string folderName = "unassigned";
         auto it = fileToFolder.find(i);
         if (it != fileToFolder.end()) {
             folderName = it->second;
         }
 
-        // Clean filename
         std::string origName(file.filename, strnlen(file.filename, 0x20));
-        // strip extension for rebuilding
         std::string stem = origName;
-        auto dot = stem.find_last_of('.');
+        size_t dot = stem.find_last_of('.');
         if (dot != std::string::npos) stem = stem.substr(0, dot);
         if (stem.empty()) stem = "unnamed_" + std::to_string(i);
 
-        // Build paths
-        fs::path outDir = fs::path("out") / folderName;
-        fs::create_directories(outDir);
+        std::string outDir = JoinPath("out", folderName);
+        CreateDirRecursive(outDir);
 
-        fs::path ss2Path = outDir / (stem + ".ss2");
-        fs::path wavPath = outDir / (stem + ".wav");
+        std::string ss2Path = JoinPath(outDir, stem + ".ss2");
+        std::string wavPath = JoinPath(outDir, stem + ".wav");
 
-        // Avoid overwriting if same name appears twice in same folder
         int suffix = 1;
-        while (fs::exists(ss2Path) || fs::exists(wavPath)) {
-            ss2Path = outDir / (stem + "_" + std::to_string(suffix) + ".ss2");
-            wavPath = outDir / (stem + "_" + std::to_string(suffix) + ".wav");
+        while (FileExists(ss2Path) || FileExists(wavPath)) {
+            ss2Path = JoinPath(outDir, stem + "_" + std::to_string(suffix) + ".ss2");
+            wavPath = JoinPath(outDir, stem + "_" + std::to_string(suffix) + ".wav");
             ++suffix;
         }
 
-        // Read audio data
         uint32_t seekPos = file.offset + m_BaseOffset;
         m_Stream.seekg(seekPos);
         std::vector<char> audio(file.size);
@@ -172,8 +215,7 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
             continue;
         }
 
-        // Write SS2 header + data
-        SS2Header hdr{};
+        SS2Header hdr = {};
         hdr.type       = 0x64685353; // 'SShd'
         hdr.one        = 0x18;
         hdr.two        = 0x10;
@@ -186,7 +228,7 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
         hdr.size       = file.size;
 
         {
-            std::ofstream out(ss2Path, std::ios::binary);
+            std::ofstream out(ss2Path.c_str(), std::ios::binary);
             if (!out) {
                 std::cerr << "  [" << i << "] cannot create " << ss2Path << "\n";
                 continue;
@@ -195,22 +237,26 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
             out.write(audio.data(), file.size);
         }
 
-        std::cout << "  [" << i << "] " << folderName << "/" << ss2Path.filename().string()
+        // filename only for display
+        size_t slash = ss2Path.find_last_of("/\\");
+        std::string displayName = (slash != std::string::npos) ? ss2Path.substr(slash + 1) : ss2Path;
+
+        std::cout << "  [" << i << "] " << folderName << "/" << displayName
                   << "  (" << file.size << " bytes, " << file.frequency << " Hz)\n";
 
         if (extractOnly) continue;
 
-        // Convert with vgmstream
 #ifdef _WIN32
-        std::string cmd = "\"" + pathToVGMStream + "\" -o \"" + wavPath.string()
-                        + "\" -l 1.0 -f 0.0 \"" + ss2Path.string() + "\"";
-        STARTUPINFOA si{};
-        PROCESS_INFORMATION pi{};
+        std::string cmd = "\"" + pathToVGMStream + "\" -o \"" + wavPath
+                        + "\" -l 1.0 -f 0.0 \"" + ss2Path + "\"";
+        STARTUPINFOA si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(si));
+        ZeroMemory(&pi, sizeof(pi));
         si.cb = sizeof(si);
         std::vector<char> cmdBuf(cmd.begin(), cmd.end());
         cmdBuf.push_back('\0');
-        if (CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
-                           0, nullptr, nullptr, &si, &pi)) {
+        if (CreateProcessA(NULL, &cmdBuf[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
             WaitForSingleObject(pi.hProcess, INFINITE);
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
@@ -218,17 +264,16 @@ void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cle
             std::cerr << "  Failed to run vgmstream for " << ss2Path << "\n";
         }
 #else
-        // Linux / macOS
-        std::string cmd = pathToVGMStream + " -o \"" + wavPath.string()
-                        + "\" -l 1.0 -f 0.0 \"" + ss2Path.string() + "\"";
+        std::string cmd = pathToVGMStream + " -o \"" + wavPath
+                        + "\" -l 1.0 -f 0.0 \"" + ss2Path + "\"";
         int ret = std::system(cmd.c_str());
         if (ret != 0) {
             std::cerr << "  vgmstream failed for " << ss2Path << " (code " << ret << ")\n";
         }
 #endif
 
-        if (cleanUp && fs::exists(wavPath)) {
-            fs::remove(ss2Path);
+        if (cleanUp && FileExists(wavPath)) {
+            RemoveFile(ss2Path);
         }
     }
 
