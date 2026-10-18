@@ -1,408 +1,236 @@
 #include "LPS.h"
 #include <iostream>
+#include <filesystem>
+#include <map>
+#include <set>
+#include <algorithm>
+#include <cstring>
+
+#ifdef _WIN32
 #include <Windows.h>
+#else
+// simple replacements for non-Windows
+#include <cstdlib>
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
-bool DirExist(char* strPath);
-bool CreateDir(char* strPath);
+namespace fs = std::filesystem;
 
-LPS::LPS()
-{
-	m_Closed = false;
-	m_SkipIndex = 0;
-	m_BaseOffset = 0;
-	m_Header = {};
-}
+LPS::LPS() = default;
 
 LPS::~LPS()
 {
-	Close();
+    Close();
 }
 
-bool LPS::Open(std::string filename)
+bool LPS::Open(const std::string& filename)
 {
-	m_Stream.open(filename, std::ios_base::binary);
+    m_Stream.open(filename, std::ios::binary);
+    if (!m_Stream.is_open()) {
+        return false;
+    }
 
-	if (!m_Stream.is_open()) {
-		return false;
-	}
+    // Read header (52 bytes)
+    m_Stream.read(reinterpret_cast<char*>(&m_Header), sizeof(m_Header));
+    if (m_Stream.gcount() != sizeof(m_Header)) {
+        std::cerr << "Failed to read header\n";
+        return false;
+    }
 
-	// Read in the data
-	m_Stream.read((char*)&m_Header, sizeof(m_Header));
+    // Sanity check
+    if (std::strncmp(m_Header.id, "LithTech PSX Sound Data 1.20", 28) != 0) {
+        std::cerr << "Not a valid LithTech PSX Sound Data file\n";
+        return false;
+    }
 
-	/*
-	    savepos TMP
-    xmath BASE_OFF "TMP + (FILES * 0x48) + (FOLDERS * 0x30)"
-	*/
-	uint currentPos = m_Stream.tellg();
-	m_BaseOffset = currentPos + (m_Header.files * 0x48) + (m_Header.folders * 0x30);
+    std::cout << "Folders: " << m_Header.folders << "  Files: " << m_Header.files << "\n";
 
-	for (uint i = 0; i < m_Header.files; i++)
-	{
-		File file;
-		m_Stream.read((char*)&file, sizeof(file));
-		m_Files.push_back(file);
-	}
-	for (uint i = 0; i < m_Header.folders; i++)
-	{
-		Folder folder;
-		m_Stream.read((char*)&folder, sizeof(folder));
-		m_Folders.push_back(folder);
-	}
+    // Read file entries
+    m_Files.resize(m_Header.files);
+    for (uint32_t i = 0; i < m_Header.files; ++i) {
+        m_Stream.read(reinterpret_cast<char*>(&m_Files[i]), sizeof(FileEntry));
+    }
 
-	return true;
+    // Read folder entries
+    m_Folders.resize(m_Header.folders);
+    for (uint32_t i = 0; i < m_Header.folders; ++i) {
+        m_Stream.read(reinterpret_cast<char*>(&m_Folders[i]), sizeof(FolderEntry));
+    }
+
+    // Audio data starts right after the directory tables
+    m_BaseOffset = static_cast<uint32_t>(m_Stream.tellg());
+    std::cout << "Audio base offset: 0x" << std::hex << m_BaseOffset << std::dec << "\n";
+
+    return true;
 }
 
 bool LPS::Close()
 {
-	if (m_Closed) {
-		return true;
-	}
-
-	m_Stream.close();
-	m_Closed = true;
-	return true;
+    if (m_Closed) return true;
+    if (m_Stream.is_open()) m_Stream.close();
+    m_Closed = true;
+    return true;
 }
 
-// There's probably a neater way to do this, but eh well.
-uint LPS::TraverseFolder(int index, BuiltFolder* builtFolder)
+std::string LPS::CleanFolderName(const char* raw, size_t maxLen)
 {
-	uint foldersTraversed = 0;
-	int indexInner = 0;
-
-	// Convenient!
-	auto folder = builtFolder->folder;
-
-	// Okay...let's traverse through some more folders and count up their files.
-	// This is probably better suited for an iterator loop, then we wouldn't need the skip section. But oh well!
-	for (auto &folderInner : m_BuiltFolders)
-	{
-
-		// We're done folks!
-		if (foldersTraversed >= folder->folders) {
-			break;
-		}
-
-		// Skip if we need to catch up
-		if (indexInner < m_SkipIndex) {
-			indexInner++;
-			continue;
-		}
-
-		// Ignore anything above us!
-		if (folderInner.folder->priority > folder->priority)
-		{
-			indexInner++;
-			continue;
-		}
-
-		// No infinite loops!
-		if (indexInner == index) {
-			indexInner++;
-			continue;
-		}
-
-		// Ignore anything before our folder, we need stuff ahead of it!
-		if (folderInner.folder->fileStartIndex < folder->fileStartIndex)
-		{
-			break;
-			indexInner++;
-			continue;
-		}
-
-		// Bolt on the path
-		std::string oldPath = folderInner.path;
-		// Ignore root, as it doesn't actually contain a path...
-		if (!builtFolder->path.empty()) {
-			folderInner.path = builtFolder->path;
-			folderInner.path += "\\";
-			folderInner.path += oldPath;
-		}
-		// Oh hey we have a folder!
-		if (folderInner.folder->folders > 0) {
-			// Recursively unwrap this folder
-			auto upToIndex = TraverseFolder(indexInner, &folderInner);
-
-			if (upToIndex > m_SkipIndex) {
-				m_SkipIndex = upToIndex;
-			}
-		}
-
-		// Increment our cool counters
-		indexInner++;
-		foldersTraversed++;
-	}
-
-	return indexInner;
+    std::string name;
+    for (size_t i = 0; i < maxLen; ++i) {
+        unsigned char c = static_cast<unsigned char>(raw[i]);
+        if (c == 0) break;
+        // only keep printable ASCII, skip path separators
+        if (c >= 32 && c < 127 && c != '/' && c != '\\' && c != ':' && c != '*') {
+            name += static_cast<char>(c);
+        } else {
+            break; // stop at first non-printable (common in these files)
+        }
+    }
+    // trim trailing spaces/dots
+    while (!name.empty() && (name.back() == ' ' || name.back() == '.')) {
+        name.pop_back();
+    }
+    if (name.empty()) name = "unknown";
+    return name;
 }
 
-
-void LPS::Extract(std::string pathToVGMStream, bool extractOnly, bool cleanUp)
+void LPS::Extract(const std::string& pathToVGMStream, bool extractOnly, bool cleanUp)
 {
-	int index = 0;
-	std::vector<BuiltSound> builtSounds;
-	m_SortedFolders = m_Folders;
-	m_SkipIndex = 0;
+    // Build a map: fileIndex -> folder name
+    // Only leaf folders that actually own files are used.
+    std::map<uint32_t, std::string> fileToFolder;
+    std::set<uint32_t> assigned;
 
-	// Sort it!
-	std::stable_sort(m_SortedFolders.begin(), m_SortedFolders.end(), by_priority_then_folder_then_startIndex());
-	
-	// Build out the initial "Built" list.
-	for (Folder folder : m_SortedFolders)
-	{
-		// Add a builtFolder with temp path for now!
-		BuiltFolder builtFolder;
-		builtFolder.folder = &m_SortedFolders[index];
-		builtFolder.path = folder.foldername;
-		m_BuiltFolders.push_back(builtFolder);
-		index++;
-	}
+    for (const auto& folder : m_Folders) {
+        if (folder.files == 0) continue;
 
-	// Load in our file list with immediate folders
-	index = 0;
-	for (Folder folder : m_SortedFolders)
-	{
+        uint32_t start = folder.fileStartIndex;
+        uint32_t count = folder.files;
 
-		if (folder.files == 0) {
-			index++;
-			continue;
-		}
+        if (start >= m_Header.files || start + count > m_Header.files) {
+            std::cerr << "Warning: folder has invalid file range ("
+                      << start << " + " << count << ")\n";
+            continue;
+        }
 
-		for (int i = folder.fileStartIndex; i < folder.files + folder.fileStartIndex; i++)
-		{
-			BuiltSound sound;
+        std::string folderName = CleanFolderName(folder.foldername, 32);
 
-			sound.file = &m_Files[i];
-			sound.folder = &m_BuiltFolders[index];
-			builtSounds.push_back(sound);
+        for (uint32_t i = start; i < start + count; ++i) {
+            // later folders can override earlier ones if ranges overlap
+            // (shouldn't happen with correct data, but be safe)
+            fileToFolder[i] = folderName;
+            assigned.insert(i);
+        }
+    }
 
-		}
-		index++;
-	}
+    // Extract every file
+    for (uint32_t i = 0; i < m_Header.files; ++i) {
+        const FileEntry& file = m_Files[i];
 
-	// Traverse the root, and get this nightmare rolling
-	auto folder = m_BuiltFolders[0];
-	TraverseFolder(0, &folder);
-	
-	// Cool, we can extract now!
-	for (auto sound : builtSounds)
-	{
-		std::cout << "-----------------------\n";
-		// Build the extraction path
-		std::string outputFilename = "out\\";
-		std::string extension = ".ss2";
-		std::string originalOutputFilename = "";
+        if (file.size == 0) {
+            std::cout << "  [" << i << "] SKIP zero-size\n";
+            continue;
+        }
 
-		outputFilename += sound.folder->path + "\\";
+        // Determine output folder
+        std::string folderName = "unassigned";
+        auto it = fileToFolder.find(i);
+        if (it != fileToFolder.end()) {
+            folderName = it->second;
+        }
 
-		// Create the directory if needed
-		auto result = CreateDir((char*)outputFilename.c_str());
+        // Clean filename
+        std::string origName(file.filename, strnlen(file.filename, 0x20));
+        // strip extension for rebuilding
+        std::string stem = origName;
+        auto dot = stem.find_last_of('.');
+        if (dot != std::string::npos) stem = stem.substr(0, dot);
+        if (stem.empty()) stem = "unnamed_" + std::to_string(i);
 
-		outputFilename += sound.file->filename;
+        // Build paths
+        fs::path outDir = fs::path("out") / folderName;
+        fs::create_directories(outDir);
 
-		// Save the original output
-		originalOutputFilename = outputFilename.c_str();
+        fs::path ss2Path = outDir / (stem + ".ss2");
+        fs::path wavPath = outDir / (stem + ".wav");
 
-		// Replace extension
-		outputFilename.replace(outputFilename.end() - 4, outputFilename.end(), extension);
+        // Avoid overwriting if same name appears twice in same folder
+        int suffix = 1;
+        while (fs::exists(ss2Path) || fs::exists(wavPath)) {
+            ss2Path = outDir / (stem + "_" + std::to_string(suffix) + ".ss2");
+            wavPath = outDir / (stem + "_" + std::to_string(suffix) + ".wav");
+            ++suffix;
+        }
 
-		std::ofstream fileOut((char*)outputFilename.c_str(), std::ios_base::binary | std::ios_base::trunc);
+        // Read audio data
+        uint32_t seekPos = file.offset + m_BaseOffset;
+        m_Stream.seekg(seekPos);
+        std::vector<char> audio(file.size);
+        m_Stream.read(audio.data(), file.size);
+        if (static_cast<uint32_t>(m_Stream.gcount()) != file.size) {
+            std::cerr << "  [" << i << "] short read for " << origName << "\n";
+            continue;
+        }
 
-		uint currentPos = 0;
-		uint togo = sound.file->size;
-		uint inc = 2048;
-		auto seek = sound.file->offset + m_BaseOffset;
+        // Write SS2 header + data
+        SS2Header hdr{};
+        hdr.type       = 0x64685353; // 'SShd'
+        hdr.one        = 0x18;
+        hdr.two        = 0x10;
+        hdr.frequency  = file.frequency;
+        hdr.channels   = 1;
+        hdr.interleave = 0;
+        hdr.zero       = 0;
+        hdr.max        = 0xFFFFFFFF;
+        hdr.three      = 0x64625353; // 'SSbd'
+        hdr.size       = file.size;
 
-		if (!fileOut.is_open()) {
-			std::cout << "ERROR: Failed to create file " << outputFilename << "\n";
-			continue;
-		}
+        {
+            std::ofstream out(ss2Path, std::ios::binary);
+            if (!out) {
+                std::cerr << "  [" << i << "] cannot create " << ss2Path << "\n";
+                continue;
+            }
+            out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+            out.write(audio.data(), file.size);
+        }
 
-		m_Stream.seekg(seek);
+        std::cout << "  [" << i << "] " << folderName << "/" << ss2Path.filename().string()
+                  << "  (" << file.size << " bytes, " << file.frequency << " Hz)\n";
 
-		/* SS2 header via the BMS script
-		put 0x64685353 long MEMORY_FILE
-		put 0x18 long MEMORY_FILE
-		put 0x10 long MEMORY_FILE
-		put FREQUENCY long MEMORY_FILE
-		put CHANNELS long MEMORY_FILE
-		put INTERLEAVE long MEMORY_FILE
-		put 0 long MEMORY_FILE
-		put 0xffffffff long MEMORY_FILE
-		put 0x64625353 long MEMORY_FILE
-		put SIZE long MEMORY_FILE
-		*/
-		SS2Header header = {
-			0x64685353,
-			0x18,
-			0x10,
-			sound.file->frequency,
-			1, // Mono!
-			0, // No interleave?
-			0,
-			0xffffffff,
-			0x64625353,
-			sound.file->size
-		};
+        if (extractOnly) continue;
 
-		// Write out the header
-		// There's probably a better way to do this.
-		fileOut.write(reinterpret_cast<const char*>(&header.type), sizeof(header.type));
-		fileOut.write(reinterpret_cast<const char*>(&header.one), sizeof(header.one));
-		fileOut.write(reinterpret_cast<const char*>(&header.two), sizeof(header.two));
-		fileOut.write(reinterpret_cast<const char*>(&header.frequency), sizeof(header.frequency));
-		fileOut.write(reinterpret_cast<const char*>(&header.channels), sizeof(header.channels));
-		fileOut.write(reinterpret_cast<const char*>(&header.interleave), sizeof(header.interleave));
-		fileOut.write(reinterpret_cast<const char*>(&header.zero), sizeof(header.zero));
-		fileOut.write(reinterpret_cast<const char*>(&header.max), sizeof(header.max));
-		fileOut.write(reinterpret_cast<const char*>(&header.three), sizeof(header.three));
-		fileOut.write(reinterpret_cast<const char*>(&header.size), sizeof(header.size));
-
-#if 0
-		char* buffer = new char[togo];
-		m_Stream.read(buffer, togo);
-		fileOut.write(buffer, togo);
+        // Convert with vgmstream
+#ifdef _WIN32
+        std::string cmd = "\"" + pathToVGMStream + "\" -o \"" + wavPath.string()
+                        + "\" -l 1.0 -f 0.0 \"" + ss2Path.string() + "\"";
+        STARTUPINFOA si{};
+        PROCESS_INFORMATION pi{};
+        si.cb = sizeof(si);
+        std::vector<char> cmdBuf(cmd.begin(), cmd.end());
+        cmdBuf.push_back('\0');
+        if (CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+                           0, nullptr, nullptr, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        } else {
+            std::cerr << "  Failed to run vgmstream for " << ss2Path << "\n";
+        }
 #else
-		// Extract 2048 by 2048
-		while (togo > 0) {
-			if (togo < inc) {
-				inc = togo;
-			}
-
-			char* buffer = new char[inc];
-
-			m_Stream.read(buffer, inc);
-			currentPos += m_Stream.gcount();
-
-			fileOut.write(buffer, inc);
-
-
-			togo -= inc;
-		}
+        // Linux / macOS
+        std::string cmd = pathToVGMStream + " -o \"" + wavPath.string()
+                        + "\" -l 1.0 -f 0.0 \"" + ss2Path.string() + "\"";
+        int ret = std::system(cmd.c_str());
+        if (ret != 0) {
+            std::cerr << "  vgmstream failed for " << ss2Path << " (code " << ret << ")\n";
+        }
 #endif
 
-		std::cout << "Extracted " << outputFilename << "\n";
+        if (cleanUp && fs::exists(wavPath)) {
+            fs::remove(ss2Path);
+        }
+    }
 
-		fileOut.close();
-
-		// Sleep, otherwise Windows will choke on CreateProcess
-		Sleep(250);
-
-		// Only extracting, let's skip the conversion.
-		if (extractOnly) {
-			continue;
-		}
-
-		// Conversion variables - Big ol' Windows mess
-		char buffer[MAX_PATH];
-		GetCurrentDirectory(MAX_PATH, buffer);
-		std::string path = buffer;
-		path += "\\";
-
-		// Loop once, no fade out!
-		std::string commandArgs = " -o \"" + path + originalOutputFilename + "\" -l 1.0 -f 0.0 \"" + path + outputFilename + "\"";
-		size_t exePosition = pathToVGMStream.find_last_of("\\");
-
-		// Trim off the starting slashes, and grab the exe name!
-		std::string exe = pathToVGMStream.substr(exePosition+1, pathToVGMStream.length());
-		commandArgs = exe + commandArgs;
-
-		STARTUPINFO si;
-		PROCESS_INFORMATION pi;
-		char* lpApplicationName = (char*)pathToVGMStream.c_str();
-		char* lpCommandArgs = (char*)commandArgs.c_str();
-
-		// set the size of the structures
-		ZeroMemory(&si, sizeof(si));
-		si.cb = sizeof(si);
-		ZeroMemory(&pi, sizeof(pi));
-
-		// start the program up
-		auto appResult = CreateProcess(lpApplicationName,   // the path
-			lpCommandArgs,        // Command line
-			NULL,           // Process handle not inheritable
-			NULL,           // Thread handle not inheritable
-			FALSE,          // Set handle inheritance to FALSE
-			0,              // No creation flags
-			NULL,           // Use parent's environment block
-			NULL,           // Use parent's starting directory 
-			&si,            // Pointer to STARTUPINFO structure
-			&pi             // Pointer to PROCESS_INFORMATION structure (removed extra parentheses)
-		);
-
-		// Wait for the process to finish. 
-		WaitForSingleObject(pi.hProcess, INFINITE);
-
-		// Close process and thread handles. 
-		CloseHandle(pi.hProcess);
-		CloseHandle(pi.hThread);
-
-		// Clean up if they requested it.
-		if (cleanUp) {
-			if (remove((char*)outputFilename.c_str()) != 0) {
-				std::cout << "Failed to clean up " << outputFilename << "\n";
-				continue;
-			}
-
-			std::cout << "Cleaned up " << outputFilename << "\n";
-		}
-		
-	}
-}
-
-
-
-//
-// From WinUtil of NOLF SDK
-// 
-bool DirExist(char* strPath)
-{
-	if (!strPath || !*strPath) return false;
-
-	bool bDirExists = false;
-
-	bool bRemovedBackSlash = false;
-	if (strPath[strlen(strPath) - 1] == '\\')
-	{
-		strPath[strlen(strPath) - 1] = '\0';
-		bRemovedBackSlash = true;
-	}
-
-	UINT oldErrorMode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
-	struct stat statbuf;
-	int error = stat(strPath, &statbuf);
-	SetErrorMode(oldErrorMode);
-	if (error != -1) bDirExists = true;
-
-	if (bRemovedBackSlash)
-	{
-		strPath[strlen(strPath)] = '\\';
-	}
-
-	return bDirExists;
-}
-
-//
-// From WinUtil of NOLF SDK
-// 
-bool CreateDir(char* strPath)
-{
-	if (DirExist(strPath)) return true;
-	if (strPath[strlen(strPath) - 1] == ':') return false;		// special case
-
-	char strPartialPath[MAX_PATH];
-	strPartialPath[0] = '\0';
-
-	char* token = strtok(strPath, "\\");
-	while (token)
-	{
-		strcat(strPartialPath, token);
-		if (!DirExist(strPartialPath) && strPartialPath[strlen(strPartialPath) - 1] != ':')
-		{
-			if (!CreateDirectoryA(strPartialPath, NULL)) return false;
-		}
-		strcat(strPartialPath, "\\");
-		token = strtok(NULL, "\\");
-	}
-
-	return true;
+    std::cout << "Done.\n";
 }

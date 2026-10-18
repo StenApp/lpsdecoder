@@ -1,60 +1,70 @@
-// lpsdecoder.cpp : This file contains the 'main' function. Program execution begins and ends there.
-//
+// lpsdecoder.cpp - LithTech PSX / PS2 LPS extractor (fixed folder handling)
 
 #include <iostream>
-#include <Windows.h>
+#include <string>
 #include "LPS.h"
-
-// See: https://github.com/jarro2783/cxxopts
 #include "cxxopts.hpp"
 
-int main(int argc, char* argv[], char* envp[])
+#ifdef _WIN32
+#include <Windows.h>
+#endif
+
+int main(int argc, char* argv[])
 {
-    
     bool showHelp = false;
     bool extractOnly = false;
     bool cleanUpSS2 = true;
-    std::string filename = "";
+    std::string filename;
+    std::string pathToVGMStream;
 
+#ifdef _WIN32
     char buffer[MAX_PATH];
-    GetCurrentDirectory(MAX_PATH, buffer);
-
+    GetCurrentDirectoryA(MAX_PATH, buffer);
 #ifdef _DEBUG
-    std::string pathToVGMStream = "\\..\\Tools\\VGMStream\\test.exe";
+    pathToVGMStream = std::string(buffer) + "\\..\\Tools\\VGMStream\\test.exe";
 #else
-    std::string pathToVGMStream = "\\VGMStream\\test.exe";
+    pathToVGMStream = std::string(buffer) + "\\VGMStream\\test.exe";
 #endif
-    pathToVGMStream = buffer + pathToVGMStream;
+#else
+    // On Linux look for vgmstream-cli in PATH or common locations
+    pathToVGMStream = "vgmstream-cli";
+#endif
 
-    cxxopts::Options options("Lithtech LPS Decoder and Extractor", "Decodes and Extracts a PS2 Lithtech LPS audio stream file.");
+    cxxopts::Options options("lpsdecoder",
+        "Decodes and extracts PS2 LithTech LPS sound archives\n"
+        "(fixed folder handling – ENGLISH / AMERICAN / PLAYER / …)");
+
     options.add_options()
-        ("h,help", "Help", cxxopts::value(showHelp))
-        ("f,file", "LPS Filename", cxxopts::value(filename))
-        ("e,extract-only", "Extract Only (Don't convert to wav)", cxxopts::value(extractOnly)->default_value("false"))
-        ("c,clean-up-ss2", "Clean up SS2 files after converting to wav", cxxopts::value<bool>(cleanUpSS2)->default_value("true"))
-        ("v,path-to-vgm-stream", "Path to VGMStream", cxxopts::value(pathToVGMStream)->default_value(pathToVGMStream))
+        ("h,help", "Show help", cxxopts::value(showHelp))
+        ("f,file", "LPS file to extract", cxxopts::value(filename))
+        ("e,extract-only", "Only write .ss2 files, do not convert to WAV",
+            cxxopts::value(extractOnly)->default_value("false"))
+        ("c,clean-up-ss2", "Delete .ss2 after successful WAV conversion",
+            cxxopts::value(cleanUpSS2)->default_value("true"))
+        ("v,vgmstream", "Path to vgmstream / vgmstream-cli executable",
+            cxxopts::value(pathToVGMStream))
         ;
 
     auto result = options.parse(argc, argv);
 
-    if (showHelp) {
+    if (showHelp || filename.empty()) {
         std::cout << options.help() << "\n";
-
+        if (filename.empty() && !showHelp) {
+            std::cout << "Error: you must specify an LPS file with -f / --file\n";
+            return 1;
+        }
         return 0;
     }
 
-    if (filename.empty()) {
-        std::cout << "Must enter a filename with -f or --file <path>";
+    LPS lps;
+    if (!lps.Open(filename)) {
+        std::cerr << "Failed to open " << filename << "\n";
         return 1;
     }
 
-    LPS* lps = new LPS();
-    if (!lps->Open(filename)) {
-        std::cout << "Failed to open " << filename << "\n";
-        return 1;
-    }
-    std::cout << "Extracting!\n";
-    lps->Extract(pathToVGMStream, extractOnly, cleanUpSS2);
-    std::cout << "Done!\n";
-    lps->Close();
+    std::cout << "Extracting...\n";
+    lps.Extract(pathToVGMStream, extractOnly, cleanUpSS2);
+    lps.Close();
+
+    return 0;
 }

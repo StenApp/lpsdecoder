@@ -2,120 +2,72 @@
 
 #include <vector>
 #include <string>
-#include <sstream>
 #include <fstream>
-#include <algorithm>
-
-typedef unsigned int uint;
+#include <cstdint>
 
 struct Header {
-    //LithTech PSX Sound Data 1.20
-    char id[28];
-    uint dummy[2];
-    uint folders;
-    uint files;
-    uint dummy2[2];
+    char id[32];          // "LithTech PSX Sound Data 1.20\r\n\x1a\0"
+    uint32_t dummy;
+    uint32_t folders;
+    uint32_t files;
+    uint32_t dummy2;
+    uint32_t dummy3;
 };
 
-struct File {
+struct FileEntry {
     char filename[0x20];
-    uint zero;
-    uint offset;
-    uint size;
-    uint frequency;
-    uint zero2;
-    uint size2;
-    uint dummy[4];
+    uint32_t zero;
+    uint32_t offset;
+    uint32_t size;
+    uint32_t frequency;
+    uint32_t zero2;
+    uint32_t size2;
+    uint32_t dummy[4];
 };
 
-struct Folder {
+struct FolderEntry {
     char foldername[32];
-    uint folders;   // Number of folders in this folder
-    uint files;     // Number of files in this folder (Note: Add this onto fileStartIndex to get the range of files.)
-    uint priority;  // Higher number is the most root...yea i don't know.
-    uint fileStartIndex;
+    uint32_t subfolders;      // number of child folders
+    uint32_t files;           // number of files in this folder
+    uint32_t priority;        // higher = closer to root
+    uint32_t fileStartIndex;  // first file index belonging to this folder
 };
 
-struct BuiltFolder {
-    std::string path;
-    Folder* folder;
-};
-
-// Final struct we'll iterate through to extract and build paths
-struct BuiltSound {
-    File* file;
-    BuiltFolder* folder;
-};
-
-/*
-struct WaveHeader {
-    char riff[4];
-    int fileSize;
-    char type[4]; 
-    char chunkMarker[4];
-    int chunkSize;
-    short formatTag;
-    unsigned short Channels;
-    unsigned int SamplePerSeconds;
-    unsigned int AverageBytesPerSeconds;
-    unsigned short BlockAlign;
-    unsigned short BitsPerSample;
-    unsigned char unknown[2];
-    char dataChunk[4];
-    int chunkSize;
-    // Then samples!
-};
-*/
 struct SS2Header {
-    uint type;
-    uint one;
-    uint two;
-    uint frequency;
-    uint channels;
-    uint interleave;
-    uint zero;
-    uint max;
-    uint three;
-    uint size;
-};
-
-struct by_priority_then_folder_then_startIndex {
-    bool operator()(Folder const& a, Folder const& b) const {
-
-        if (a.priority != b.priority) return a.priority > b.priority;
-        
-        if (a.folders != b.folders) return a.folders > b.folders;
-
-        return a.fileStartIndex > b.fileStartIndex;
-    }
+    uint32_t type;       // 'SShd'
+    uint32_t one;        // 0x18
+    uint32_t two;        // 0x10
+    uint32_t frequency;
+    uint32_t channels;
+    uint32_t interleave;
+    uint32_t zero;
+    uint32_t max;
+    uint32_t three;      // 'SSbd'
+    uint32_t size;
 };
 
 class LPS
 {
 public:
-	LPS();
-	~LPS();
+    LPS();
+    ~LPS();
 
-	bool Open(std::string filename);
-	bool Close();
+    bool Open(const std::string& filename);
+    bool Close();
 
-	void Extract(std::string pathToVGMStream, bool extractOnly, bool cleanUp);
-protected:
+    // extractOnly = true  -> only write .ss2
+    // cleanUp    = true  -> delete .ss2 after successful conversion
+    void Extract(const std::string& pathToVGMStream, bool extractOnly, bool cleanUp);
 
-    uint TraverseFolder(int index, BuiltFolder* builtFolder);
+private:
+    // Returns a clean folder name (printable chars only, no path separators)
+    static std::string CleanFolderName(const char* raw, size_t maxLen);
 
-    Header m_Header;
-    std::vector<File> m_Files;
-    std::vector<Folder> m_Folders;
-
-    std::vector<Folder> m_SortedFolders;
-
-    std::vector<BuiltFolder> m_BuiltFolders;
+    Header m_Header{};
+    std::vector<FileEntry> m_Files;
+    std::vector<FolderEntry> m_Folders;
 
     std::ifstream m_Stream;
-
-    int m_SkipIndex;
-    bool m_Closed;
-    uint m_BaseOffset;
+    bool m_Closed = false;
+    uint32_t m_BaseOffset = 0;
 };
-
