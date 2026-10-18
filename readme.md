@@ -55,7 +55,7 @@ lpsdecoder.exe -f t06s01.lps -e
 ## Requirements
 
 - VGMStream (`vgmstream-cli` or the Windows `test.exe`) for WAV conversion.
-- C++17 compiler (uses `std::filesystem`).
+- C++14 or newer (VS2019+ / g++).
 
 ## Credits
 
